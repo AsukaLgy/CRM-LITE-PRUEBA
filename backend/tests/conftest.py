@@ -6,17 +6,21 @@ import sys
 from pathlib import Path
 import pytest
 
-os.environ['MYSQL_DATABASE'] = os.environ.get('TEST_MYSQL_DATABASE', 'comgraf_test')
+application_database = os.environ.get('MYSQL_DATABASE')
+test_database = os.environ.get('TEST_MYSQL_DATABASE', 'comgraf_test')
+if application_database == test_database and os.environ.get('LOW_RESOURCE_TEST_MODE') != '1':
+    raise RuntimeError('Las pruebas no pueden usar MYSQL_DATABASE operativo; inicia el perfil aislado de pruebas.')
+os.environ['MYSQL_DATABASE'] = test_database
 os.environ['UPLOAD_DIR'] = os.environ.get('TEST_UPLOAD_DIR', str(Path('../.runtime/test-uploads').resolve()))
-from app.config import settings
+from app.config import settings  # noqa: E402
 if not settings.mysql_database.endswith('_test'):
     raise RuntimeError('Las pruebas requieren una base terminada en _test')
-from app.db import SessionLocal, engine, Base
-from app.models import User
-from app.security import passwords
-from app.main import app
-from fastapi.testclient import TestClient
-from sqlalchemy import text
+from app.db import SessionLocal, engine, Base  # noqa: E402
+from app.models import User  # noqa: E402
+from app.security import passwords  # noqa: E402
+from app.main import app  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 
 @pytest.fixture(scope='session', autouse=True)

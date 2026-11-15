@@ -191,8 +191,8 @@ def collect_container_stats(names):
     return values
 
 
-def docker_project_containers():
-    result = subprocess.run(['docker', 'ps', '--filter', 'label=com.docker.compose.project=comgraf-lan-light',
+def docker_project_containers(project_name):
+    result = subprocess.run(['docker', 'ps', '--filter', f'label=com.docker.compose.project={project_name}',
                              '--format', '{{.Names}}'], capture_output=True, text=True)
     return result.stdout.splitlines() if result.returncode == 0 else []
 
@@ -264,8 +264,8 @@ def disk_counters(path):
     return None
 
 
-def mysql_status():
-    command = ['docker', 'exec', 'comgraf-lan-light-db-1', 'sh', '-c',
+def mysql_status(project_name):
+    command = ['docker', 'exec', f'{project_name}-db-1', 'sh', '-c',
                'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql --protocol=socket --socket=/run/mysqld/mysql.sock -uroot -N -B -e '
                '"SHOW GLOBAL STATUS WHERE Variable_name IN (\'Threads_connected\',\'Threads_running\',\'Connections\',\'Slow_queries\',\'Questions\',\'Innodb_buffer_pool_reads\',\'Innodb_buffer_pool_read_requests\')"']
     try:
@@ -313,19 +313,20 @@ def load_user(base, user, duration, stop, shared):
         shared['durations'].append(client.durations)
 
 
-def load_test(base, credential_file, duration, user_count, sample_interval, mysql_data_dir=None):
+def load_test(base, credential_file, duration, user_count, sample_interval, mysql_data_dir=None,
+              project_name='comgraf-lan-light'):
     data = json.loads(Path(credential_file).read_text(encoding='utf-8'))
     if data.get('environment') != 'test-only' or len(data.get('users', [])) < user_count:
         raise SystemExit('Need enough distinct users from a test-only seed file.')
     stop = threading.Event()
     shared = {'deadline': time.monotonic() + duration, 'errors': [], 'durations': [], 'logins': 0}
-    containers = docker_project_containers()
+    containers = docker_project_containers(project_name)
     samples = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=user_count) as pool:
         futures = [pool.submit(load_user, base, user, duration, stop, shared) for user in data['users'][:user_count]]
         while time.monotonic() < shared['deadline'] and not stop.wait(sample_interval):
             sample = {'timestamp': time.time(), **host_metrics(), 'containers': collect_container_stats(containers),
-                      'mysql_status': mysql_status(), 'mysql_disk': disk_counters(mysql_data_dir)}
+                      'mysql_status': mysql_status(project_name), 'mysql_disk': disk_counters(mysql_data_dir)}
             samples.append(sample)
         for future in futures:
             future.result()
@@ -346,6 +347,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=['smoke', 'idle', 'load'])
     parser.add_argument('--base-url', default='https://localhost:18443')
+    parser.add_argument('--project-name', default='comgraf-lan-light',
+                        help='Nombre Compose del perfil que se medirá.')
     parser.add_argument('--credentials', type=Path)
     parser.add_argument('--duration', type=int, default=120)
     parser.add_argument('--users', type=int, default=5)
@@ -368,12 +371,12 @@ def main():
         report = {'mode': 'smoke', 'timestamp': time.time(), 'api_ready_wait_ms': ready_ms,
                   'result': functional_smoke(args.base_url, args.credentials)}
     elif args.mode == 'idle':
-        containers = docker_project_containers()
+        containers = docker_project_containers(args.project_name)
         samples = []
         deadline = time.monotonic() + args.duration
         while time.monotonic() < deadline:
             samples.append({'timestamp': time.time(), **host_metrics(), 'containers': collect_container_stats(containers),
-                            'mysql_status': mysql_status(), 'mysql_disk': disk_counters(args.mysql_data_dir)})
+                            'mysql_status': mysql_status(args.project_name), 'mysql_disk': disk_counters(args.mysql_data_dir)})
             time.sleep(min(args.sample_interval, max(0, deadline - time.monotonic())))
         report = {'mode': 'idle', 'timestamp': time.time(), 'duration_requested_seconds': args.duration,
                   'sample_count': len(samples), 'container_names_at_start': containers,
@@ -382,7 +385,7 @@ def main():
         ready_ms = wait_for_ready(args.base_url)
         report = {'mode': 'load', 'timestamp': time.time(), 'api_ready_wait_ms': ready_ms,
                   **load_test(args.base_url, args.credentials, args.duration, args.users, args.sample_interval,
-                              args.mysql_data_dir)}
+                              args.mysql_data_dir, args.project_name)}
     encoded = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

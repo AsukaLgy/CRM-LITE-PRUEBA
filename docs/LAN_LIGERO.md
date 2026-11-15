@@ -1,8 +1,8 @@
 # Comgraf LAN ligero — perfil experimental
-> **Guía vigente:** [Operación](OPERACION.md) contiene el procedimiento actual de actualización, respaldo y diagnóstico para `/opt/comgraf-beta/lite`. Este documento conserva el contexto de la intervención que describe.
+> **Guía de laboratorio, no confirmación del servidor actual.** [Operación](OPERACION.md) documenta el procedimiento beta registrado en el repositorio. Esta revisión no tuvo acceso al NAS. El historial Git original de la rama experimental no está en este checkout; nombres de ramas y commits que aparezcan más abajo son referencias históricas, no una versión que deba desplegarse.
 
 
-Este perfil existe en la rama `experiment/lan-low-resource` y usa el proyecto Compose `comgraf-lan-light`. Mantiene la aplicación completa; crea una base, adjuntos, secretos, registros, certificados y respaldos separados. El Compose normal `compose.yaml`, su base y sus puertos no se modifica al usar los comandos de esta guía. No se copian `.env`, certificados privados, la cuenta Yahoo ni datos reales. El correo queda sin configurar.
+Este perfil usa `compose.low-resource.yaml` y, en su instalación normal, el proyecto Compose `comgraf-lan-light`. Mantiene la aplicación completa; crea una base, adjuntos, secretos, registros, certificados y respaldos separados. El Compose normal `compose.yaml`, su base y sus puertos no se modifica al usar los comandos de esta guía. No se copian `.env`, certificados privados, la cuenta Yahoo ni datos reales. El correo queda sin configurar.
 
 El commit base de la rama es `b3969fd0453f9d496986703277a20dbdea1caf1f`. Las mediciones hechas en la computadora de desarrollo y sus límites están en [LAN_LIGERO_RESULTADOS.md](LAN_LIGERO_RESULTADOS.md); no equivalen a una prueba en el NAS.
 
@@ -48,10 +48,20 @@ Para prueba desechable en una computadora de desarrollo (nunca para instalar dat
 ```sh
 python3 scripts/prepare-low-resource.py \
   --mysql-data-dir .runtime/lan-light-test-data/mysql \
-  --app-data-dir .runtime/lan-light-test-data/app --test-mode
+  --app-data-dir .runtime/lan-light-test-data/app \
+  --runtime-dir .runtime/lan-light-test-data/runtime --test-mode
+export LOW_RESOURCE_ENV_FILE="$(pwd)/.runtime/lan-light-test-data/runtime/.env"
+scripts/low-resource-compose.sh config --quiet
+scripts/low-resource-compose.sh build
+scripts/low-resource-compose.sh up -d --no-build
+scripts/low-resource-compose.sh ps
 ```
 
-El perfil escucha inicialmente solo en `127.0.0.1:18443` y `127.0.0.1:18080`. Para una prueba LAN, edita el `.env` aislado y cambia `HTTPS_BIND` por la IP LAN fija/reservada del NAS y `HTTPS_HOST` por esa misma IP. No uses `0.0.0.0` salvo que quieras publicar el servicio en todas las interfaces; limita el acceso a la LAN con la política de red existente. No abras puertos del router. Caddy emite una CA privada local. Exporta únicamente su certificado público con `docker cp comgraf-lan-light-https_proxy-1:/data/caddy/pki/authorities/local/root.crt ./comgraf-lan-light-root.crt`, transfiérelo al teléfono por un medio local y confía en él desde los ajustes de certificados de Android. **No copies `root.key`**. El navegador debe mostrar HTTPS confiable para permitir cámara. No reutilices el certificado privado de producción.
+El modo de prueba usa el proyecto Compose `comgraf-lan-light-test`, la base `comgraf_lan_test` y los puertos `127.0.0.1:28443`/`127.0.0.1:28080`. MySQL, adjuntos y `.env` deben permanecer bajo `.runtime/lan-light-test-data`; el validador rechaza otras rutas. El proyecto, la base y los puertos son distintos de los valores normales. No expongas este perfil a la LAN.
+
+La instalación normal escucha inicialmente solo en `127.0.0.1:18443` y `127.0.0.1:18080`. Para una instalación LAN autorizada, edita únicamente el `.env` normal y cambia `HTTPS_BIND` por la IP LAN fija/reservada del NAS y `HTTPS_HOST` por esa misma IP. No uses `0.0.0.0` salvo que hayas decidido publicar el servicio en todas las interfaces; limita el acceso a la LAN con la política de red existente. No abras puertos del router. Caddy emite una CA privada local. Exporta únicamente su certificado público con `docker cp comgraf-lan-light-https_proxy-1:/data/caddy/pki/authorities/local/root.crt ./comgraf-lan-light-root.crt`, transfiérelo por un medio local al dispositivo que usa el rol Escáner y confía en él desde los ajustes de certificados de Android. **No copies `root.key`**. No reutilices el certificado privado de producción.
+
+**Instalaciones anteriores requieren inspección antes de pruebas.** Una versión previa del preparador podía asignar `comgraf_lan_test` al perfil normal y compartirlo con la variable de pruebas. Esta corrección no reescribe `.env` ni bases existentes. No ejecutes `pytest`, `tests.low_resource_seed` ni benchmarks con una instalación previa hasta comprobar en privado que base operativa, base de pruebas, proyecto Compose, directorios y puertos pertenecen al perfil aislado; no renombres bases ni cambies credenciales para “arreglarlo”.
 
 Para construir en una máquina de preparación (sin `.env`, sin acceso a la base ni a secretos del NAS):
 
@@ -126,31 +136,34 @@ Los logs Python rotan por archivo a 5 MiB con cuatro respaldos, en `APP_DATA_DIR
 
 ## Pruebas reproducibles
 
-Todas las pruebas automatizadas usan `comgraf_lan_test` y limpian tablas; verifica la base antes de ejecutar. Los datos tienen prefijo DEMO. Nunca apuntes `MYSQL_DATABASE` a la instancia operativa. El Compose de prueba lleva base/volúmenes/puertos distintos y no recibe credenciales Yahoo.
+La suite de integración trunca tablas y limpia registros del esquema indicado por `TEST_MYSQL_DATABASE`. Ejecútala únicamente en el modo aislado anterior: proyecto `comgraf-lan-light-test`, base `comgraf_lan_test`, almacenamiento bajo `.runtime/lan-light-test-data` y puertos distintos a los normales. No basta con que el nombre de la base termine en `_test`. El generador y la validación de almacenamiento rechazan rutas de producción; el código también se niega a sembrar datos si no detecta el perfil aislado.
 
-Después de arrancar un perfil local aislado:
+Después de preparar y arrancar el perfil de prueba con los comandos anteriores, desde la raíz del checkout:
 
 ```sh
+export LOW_RESOURCE_ENV_FILE="$(pwd)/.runtime/lan-light-test-data/runtime/.env"
+docker cp comgraf-lan-light-test-https_proxy-1:/data/caddy/pki/authorities/local/root.crt /tmp/comgraf-lan-light-test-root.crt
 scripts/low-resource-compose.sh exec -e COOKIE_SECURE=false app python -m pytest tests -q -p no:cacheprovider
 scripts/low-resource-compose.sh exec app python -m tests.low_resource_seed
 ```
 
-El archivo con cinco cuentas temporales queda en `APP_DATA_DIR/test-uploads/low-resource-test-users.json` (modo 0600). Ejecuta contra el HTTPS de prueba; el benchmark espera a que `/api/health` confirme que la API está lista. Para la CA interna local, proporciona la CA mediante `--ca-cert`:
+El archivo con cinco cuentas temporales queda en el directorio de datos de prueba `app/test-uploads/low-resource-test-users.json` (modo 0600). No compartas ese archivo: contiene contraseñas temporales. Ejecuta el benchmark contra el HTTPS local de prueba; espera que `/api/health` confirme que la API está lista. Para la CA interna local, proporciona la CA mediante `--ca-cert`:
 
 ```sh
 python3 scripts/low-resource-benchmark.py smoke \
-  --base-url https://localhost:18443 \
-  --credentials /srv/comgraf-lan/test-uploads/low-resource-test-users.json \
-  --ca-cert /tmp/comgraf-lan-light-root.crt
+  --base-url https://localhost:28443 --project-name comgraf-lan-light-test \
+  --credentials .runtime/lan-light-test-data/app/test-uploads/low-resource-test-users.json \
+  --ca-cert /tmp/comgraf-lan-light-test-root.crt
 python3 scripts/low-resource-benchmark.py idle --duration 120 --sample-interval 5 \
-  --mysql-data-dir /srv/comgraf-mysql/lan-light
+  --project-name comgraf-lan-light-test \
+  --mysql-data-dir .runtime/lan-light-test-data/mysql
 python3 scripts/low-resource-benchmark.py load \
-  --base-url https://localhost:18443 \
-  --credentials /srv/comgraf-lan/test-uploads/low-resource-test-users.json \
-  --ca-cert /tmp/comgraf-lan-light-root.crt \
+  --base-url https://localhost:28443 --project-name comgraf-lan-light-test \
+  --credentials .runtime/lan-light-test-data/app/test-uploads/low-resource-test-users.json \
+  --ca-cert /tmp/comgraf-lan-light-test-root.crt \
   --users 5 --duration 600 --sample-interval 5 \
-  --mysql-data-dir /srv/comgraf-mysql/lan-light \
-  --output /srv/comgraf-lan/logs/low-resource-load.json
+  --mysql-data-dir .runtime/lan-light-test-data/mysql \
+  --output .runtime/lan-light-test-data/app/logs/low-resource-load.json
 ```
 
 `smoke` recorre login, creación de cliente/solicitud, asignación, nota, orden CAI, avance Aprobación→Impresión, calendario, adjunto y descarga. `load` ejecuta consultas de bandejas, cliente, expediente y calendario como cinco usuarios distintos, con pausas aleatorias de 0.25–0.65 s entre pantallas y 2–5 s entre recorridos. Registra p50/p95/máximo, HTTP/timeouts, máximos por contenedor, conexiones/consultas lentas MySQL, E/S y espera del dispositivo que contiene los datos de MySQL, RAM/swap del host y contadores OOM/fallos mayores. `/proc/diskstats` mide el dispositivo completo, no solo el contenedor; en un disco compartido los resultados incluyen otros servicios. Ejecuta la prueba breve primero. Detén con Ctrl+C si la máquina empieza a intercambiar memoria, aparecen OOM, el disco se satura o servicios preexistentes se degradan.

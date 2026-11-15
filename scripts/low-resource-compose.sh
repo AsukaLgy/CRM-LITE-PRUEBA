@@ -5,9 +5,14 @@ REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE=${LOW_RESOURCE_ENV_FILE:-"$REPO/.runtime/low-resource/.env"}
 cd "$REPO"
 OVERRIDE_FILE=${LOW_RESOURCE_OVERRIDE_FILE:-}
+PROJECT_NAME=${LOW_RESOURCE_PROJECT_NAME:-}
 if [ -z "$OVERRIDE_FILE" ] && [ -r "$ENV_FILE" ]; then
   OVERRIDE_FILE=$(awk -F= '$1 == "LOW_RESOURCE_OVERRIDE_FILE" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")
 fi
+if [ -z "$PROJECT_NAME" ] && [ -r "$ENV_FILE" ]; then
+  PROJECT_NAME=$(awk -F= '$1 == "LOW_RESOURCE_PROJECT_NAME" {sub(/^[^=]*=/, ""); print; exit}' "$ENV_FILE")
+fi
+PROJECT_NAME=${PROJECT_NAME:-comgraf-lan-light}
 if [ -n "$OVERRIDE_FILE" ] && [ ! -f "$OVERRIDE_FILE" ]; then
   printf 'No existe el archivo override configurado: %s\n' "$OVERRIDE_FILE" >&2
   exit 1
@@ -18,8 +23,8 @@ case "${1:-}" in
     ;;
 esac
 if [ -n "$OVERRIDE_FILE" ]; then
-  exec docker compose --project-name comgraf-lan-light \
+  exec docker compose --project-name "$PROJECT_NAME" \
     -f compose.low-resource.yaml -f "$OVERRIDE_FILE" --env-file "$ENV_FILE" "$@"
 fi
-exec docker compose --project-name comgraf-lan-light \
+exec docker compose --project-name "$PROJECT_NAME" \
   -f compose.low-resource.yaml --env-file "$ENV_FILE" "$@"

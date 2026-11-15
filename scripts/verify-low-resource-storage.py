@@ -60,8 +60,17 @@ def main():
         try:
             mysql.relative_to(TEST_ROOT)
             app.relative_to(TEST_ROOT)
+            env_file.relative_to(TEST_ROOT)
         except ValueError:
-            raise SystemExit('--test-mode solo se permite con rutas bajo .runtime/lan-light-test-data.')
+            raise SystemExit('--test-mode solo se permite con runtime, MySQL y aplicación bajo .runtime/lan-light-test-data.')
+        if values.get('LOW_RESOURCE_PROJECT_NAME') != 'comgraf-lan-light-test':
+            raise SystemExit('El perfil de prueba debe usar el proyecto Compose comgraf-lan-light-test.')
+        if not values.get('MYSQL_DATABASE', '').endswith('_test'):
+            raise SystemExit('El perfil de prueba requiere MYSQL_DATABASE terminado en _test.')
+        if values.get('TEST_MYSQL_DATABASE') != values.get('MYSQL_DATABASE'):
+            raise SystemExit('La base de pruebas debe coincidir con la base aislada de este perfil.')
+        if values.get('HTTPS_PORT') == '18443' or values.get('HTTP_PORT') == '18080':
+            raise SystemExit('El perfil de prueba requiere puertos distintos a los del perfil normal.')
     elif mysql_mount == '/':
         raise SystemExit(f'MySQL resolvería al sistema de archivos raíz ({mysql_mount}); monta el disco de base antes de iniciar.')
     print(f'Almacenamiento verificado: MySQL {mysql} ({mysql_type}, montaje {mysql_mount}); aplicación {app} ({app_type}, montaje {app_mount}).')

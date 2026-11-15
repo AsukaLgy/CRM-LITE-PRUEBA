@@ -12,6 +12,41 @@ TEST_ROOT = REPO / '.runtime' / 'lan-light-test-data'
 REMOTE_FS = {'cifs', 'smb3', 'nfs', 'nfs4', 'sshfs', '9p'}
 
 
+def profile_defaults(test_mode: bool) -> dict[str, str]:
+    """Keep a normal installation distinct from its destructive test profile."""
+    if test_mode:
+        return {
+            'LOW_RESOURCE_PROJECT_NAME': 'comgraf-lan-light-test',
+            'MYSQL_DATABASE': 'comgraf_lan_test',
+            'TEST_MYSQL_DATABASE': 'comgraf_lan_test',
+            'HTTPS_PORT': '28443',
+            'HTTP_PORT': '28080',
+        }
+    return {
+        'LOW_RESOURCE_PROJECT_NAME': 'comgraf-lan-light',
+        'MYSQL_DATABASE': 'comgraf_lan',
+        'TEST_MYSQL_DATABASE': 'comgraf_test',
+        'HTTPS_PORT': '18443',
+        'HTTP_PORT': '18080',
+    }
+
+
+def require_test_paths(mysql_dir: Path, app_dir: Path, runtime_dir: Path) -> None:
+    root = TEST_ROOT.resolve()
+    for label, path in (('MySQL', mysql_dir), ('aplicación', app_dir), ('runtime', runtime_dir)):
+        try:
+            path.resolve().relative_to(root)
+        except ValueError as exc:
+            raise SystemExit(f'--test-mode solo acepta rutas de {label} bajo {root}; no apunta a una instalación real.') from exc
+
+
+def require_separate_paths(mysql_dir: Path, app_dir: Path, runtime_dir: Path) -> None:
+    paths = (mysql_dir, app_dir, runtime_dir)
+    for index, path in enumerate(paths):
+        if any(path == other or path in other.parents or other in path.parents for other in paths[index + 1:]):
+            raise SystemExit('MySQL, aplicación y runtime deben usar directorios separados.')
+
+
 def filesystem(path: Path):
     if not shutil.which('findmnt'):
         raise SystemExit('Se requiere findmnt (util-linux) para validar el almacenamiento; no se instaló nada.')
@@ -49,18 +84,13 @@ def main():
     mysql_dir = args.mysql_data_dir.expanduser().resolve()
     app_dir = args.app_data_dir.expanduser().resolve()
     runtime_dir = args.runtime_dir.expanduser().resolve()
-    if mysql_dir == app_dir or mysql_dir in app_dir.parents or app_dir in mysql_dir.parents:
-        raise SystemExit('MySQL y los datos de aplicación deben usar directorios separados.')
+    require_separate_paths(mysql_dir, app_dir, runtime_dir)
     if mysql_dir.exists() and any(mysql_dir.iterdir()):
         raise SystemExit(f'{mysql_dir} no está vacío; no se reutiliza ni modifica un directorio de datos existente.')
     if runtime_dir.exists() and any(runtime_dir.iterdir()):
         raise SystemExit(f'{runtime_dir} ya contiene archivos; no se sobrescribió nada.')
     if args.test_mode:
-        try:
-            mysql_dir.relative_to(TEST_ROOT.resolve())
-            app_dir.relative_to(TEST_ROOT.resolve())
-        except ValueError:
-            raise SystemExit(f'--test-mode solo acepta rutas bajo {TEST_ROOT}; no apunta a una instalación real.')
+        require_test_paths(mysql_dir, app_dir, runtime_dir)
     else:
         require_local(mysql_dir, test_mode=False, require_mount=True)
         require_local(app_dir, test_mode=False, require_mount=False)
@@ -77,14 +107,12 @@ def main():
         'APP_DATA_DIR': str(app_dir),
         'APP_UID': str(os.getuid()),
         'APP_GID': str(os.getgid()),
-        'MYSQL_DATABASE': 'comgraf_lan_test',
         'MYSQL_USER': 'comgraf_lan',
         'MYSQL_PASSWORD': secrets.token_hex(32),
         'MYSQL_ROOT_PASSWORD': secrets.token_hex(32),
         'HTTPS_BIND': '127.0.0.1',
         'HTTPS_HOST': 'localhost',
-        'HTTPS_PORT': '18443',
-        'HTTP_PORT': '18080',
+        **profile_defaults(args.test_mode),
     }
     env_file = runtime_dir / '.env'
     env_file.write_text(''.join(f'{key}={value}\n' for key, value in values.items()), encoding='utf-8')

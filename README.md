@@ -2,7 +2,7 @@
 
 CRM de la imprenta para solicitudes, clientes, cotizaciones, órdenes de producción, entregas y cobros. La interfaz React y la API FastAPI comparten origen; SQLAlchemy y Alembic gestionan MySQL. La interfaz funciona sin CDN ni servicios externos obligatorios.
 
-**Guía principal:** [Operación, desarrollo, actualización y recuperación](docs/OPERACION.md). Para cambios de negocio y mapa de módulos, consulta [Mantenimiento](docs/MANTENIMIENTO.md) y [Arquitectura](docs/ARQUITECTURA.md). La [revisión de mantenimiento](docs/REVISION_MANTENIMIENTO.md) registra métricas y pruebas comparables. Las instrucciones de versiones anteriores se conservan como historial y no sustituyen la guía principal.
+**Índice de documentación:** [docs/INDICE.md](docs/INDICE.md). Para empezar a desarrollar, usa esta guía; para módulos y reglas, consulta [Arquitectura](docs/ARQUITECTURA.md) y [Mantenimiento](docs/MANTENIMIENTO.md). Administración y recuperación están en [Operación](docs/OPERACION.md); los procedimientos de usuario están en [Uso operativo](docs/USO_OPERATIVO.md). Los registros anteriores se identifican como históricos en el índice.
 
 ## Estructura
 

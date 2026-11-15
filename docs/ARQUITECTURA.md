@@ -6,6 +6,43 @@ React 19 + JavaScript + Vite. FastAPI sirve los archivos compilados y `/api` des
 
 `backend/app/routers` contiene transporte HTTP; `schemas.py`, validación de entrada; `services.py`, transacciones y reglas; `repository.py`, consultas y representación según permisos; `models.py`, relaciones persistentes. Calendario, cobros y comunicaciones no son servicios independientes.
 
+## Mapa de ejecución y responsabilidades
+
+```mermaid
+flowchart LR
+  B[Navegador de escritorio] -->|mismo origen: React y /api| C[Caddy HTTPS en despliegue]
+  C --> F[FastAPI / Uvicorn]
+  V[Vite en desarrollo] -->|proxy /api| F
+  F --> R[routers: transporte y permisos]
+  R --> S[schemas: validación]
+  R --> L[services: transacciones y reglas]
+  L --> Q[repository: consultas/proyecciones]
+  Q --> O[SQLAlchemy]
+  O --> M[(MySQL / InnoDB)]
+  F --> U[(UPLOAD_DIR: archivos)]
+  F --> W[loop interno de seguimiento y limpieza]
+  W --> M
+  W --> U
+```
+
+| Módulo | Responsabilidad y dependencia permitida | Entrada / salida principal | Consumidores |
+|---|---|---|---|
+| `frontend/src/api.js` | Transporte HTTP, contrato, formato de errores y utilidades compartidas; no contiene permisos de autoridad | Ruta/opciones → respuesta tipada o error recuperable | Páginas y formularios React |
+| `frontend/src/App.jsx` | Login, navegación y guardas visuales; carga vistas | Sesión/permisos → pantalla/ruta | Navegador |
+| Páginas/componentes en `frontend/src/` | Presentación y captura; llaman a `api.js`; no deben duplicar reglas críticas | Datos de API/entrada usuario → solicitudes y acciones | Usuario autenticado |
+| `backend/app/routers/` | Rutas HTTP, identidad/permisos de la petición y respuesta | Pydantic + usuario/DB → JSON o archivo | FastAPI |
+| `schemas.py` | Validación y límites de formas entrantes | JSON/formulario → modelos Pydantic | Routers |
+| `services.py` y `deletion.py` | Reglas transaccionales, bloqueo, idempotencia, auditoría y efectos de negocio | Sesión/usuario/entidad/entrada → entidades actualizadas | Routers y ciclo interno |
+| `repository.py` | Consultas, visibilidad y proyecciones para listas/detalles | Sesión/usuario/filtros → datos de salida | Routers/servicios |
+| `models.py` / `db.py` | Esquema ORM, constraints/índices, engine y sesiones | Entidades SQLAlchemy ↔ MySQL | Repository, services y routers |
+| `migrations/versions/` | Evolución incremental del esquema existente | Revisión previa → revisión nueva | Inicio de aplicación y mantenimiento |
+
+`app.start` configura logging, aplica Alembic y levanta Uvicorn. `main.py` inicia un loop de lifespan para reabrir seguimientos vencidos y reintentar limpieza de archivos; se ejecuta por proceso Uvicorn, por lo que el perfil de recursos establece un solo worker. No hay una cola externa ni scheduler independiente en el checkout.
+
+En desarrollo, `frontend/vite.config.js` reenvía `/api` a FastAPI. En producción el Dockerfile compila React y copia `dist` a la imagen backend; FastAPI sirve assets y fallback SPA desde el mismo origen. Archivos adjuntos se guardan en `UPLOAD_DIR`, separado de MySQL y respaldado aparte.
+
+Las rutas y los límites de cada documento están resumidos en el [índice de documentación](INDICE.md). Para el mapa de tablas y migraciones consulta [Base de datos](BASE_DE_DATOS.md).
+
 ## Expediente único
 
 `cases.id` es estable; número visible `CG-000001`; enlace `/cases/1`. Cliente y contacto son claves foráneas. Una solicitud puede tener varias órdenes; `productions.id` identifica cada OP y `productions.case_id` la vincula al expediente. La revisión 008 conserva como IDs las claves históricas de las órdenes, de modo que sus números OP y enlaces `/cases/{id}` existentes siguen resolviendo la orden original. Productos, movimientos y seguimientos nuevos guardan además `production_id`; la solicitud conserva cliente, propietario, atención, ciclo de vida, notas y comunicación comunes.

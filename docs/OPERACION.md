@@ -1,6 +1,8 @@
 # Operación de COMGRAF CRM
 
-Esta es la guía vigente para desarrollo, actualización y recuperación. El servidor de la imprenta usa el perfil `compose.low-resource.yaml`, el wrapper `scripts/low-resource-compose.sh` y el checkout `/opt/comgraf-beta/lite`. Los documentos de migraciones anteriores describen decisiones históricas; no son instrucciones alternativas para actualizar esa instalación.
+Esta es la guía del perfil beta para desarrollo, actualización y recuperación. El checkout registrado en la guía es `/opt/comgraf-beta/lite` y usa `compose.low-resource.yaml` con el wrapper `scripts/low-resource-compose.sh`; el servidor físico no estuvo accesible en esta revisión, así que confirma la ruta, rama y perfil efectivos antes de ejecutar comandos. Los documentos de migraciones anteriores describen decisiones históricas; no son instrucciones alternativas para actualizar esa instalación.
+
+Consulta el [índice central](INDICE.md) para distinguir guías actuales de resultados históricos. El [manual de uso](USO_OPERATIVO.md) es para el equipo; [solución de problemas](SOLUCION_PROBLEMAS.md) contiene diagnósticos iniciales. Los datos de hardware y configuración efectiva del NAS deben comprobarse directamente antes de ejecutar una operación: el repositorio por sí solo no confirma el estado del host.
 
 ## Mapa del proyecto
 
@@ -70,7 +72,7 @@ npm run lint
 npm run build
 ```
 
-`conftest.py` rechaza bases sin sufijo `_test`; las pruebas borran **solo** registros de esa base. Los smoke tests de `frontend/e2e/*.mjs` usan respuestas ficticias y un servidor estático de `frontend/dist` en `127.0.0.1:4173`. La suite Playwright completa requiere una instancia que apunte a una base `_test` y las credenciales ficticias generadas por `backend/tests/seed_e2e.py`; nunca se ejecuta contra producción. `npm run format:check` aún detecta formato heredado en archivos existentes; no mezcles una reformateación masiva con cambios de negocio.
+`conftest.py` rechaza bases sin sufijo `_test` y, dentro de Compose, también rechaza que la base de pruebas coincida con la base operativa fuera del modo aislado. Las pruebas de integración borran filas y no deben ejecutarse contra datos reales. El perfil LAN de prueba usa un proyecto, base, almacenamiento y puertos separados; sigue [LAN ligero: pruebas reproducibles](LAN_LIGERO.md#pruebas-reproducibles). Un `.env` generado por una versión anterior no se actualiza solo: verifica su configuración antes de ejecutar pruebas y no lo renombres ni cambies bases para hacerlas pasar. Los smoke tests de `frontend/e2e/*.mjs` usan respuestas ficticias y un servidor estático de `frontend/dist` en `127.0.0.1:4173`. La suite Playwright completa requiere una instancia que apunte a una base `_test` aislada y las credenciales ficticias generadas por `backend/tests/seed_e2e.py`; nunca se ejecuta contra producción. `npm run format:check` aún detecta formato heredado en archivos existentes; no mezcles una reformateación masiva con cambios de negocio.
 
 ## Actualizar `/opt/comgraf-beta/lite`
 

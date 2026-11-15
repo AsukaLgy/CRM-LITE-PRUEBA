@@ -11,9 +11,21 @@ from app.repository import client_search_text
 from app.security import passwords
 
 
-def main():
-    if not settings.mysql_database.endswith('_test'):
+def require_test_profile(database: str, test_mode: str, project_name: str) -> None:
+    if test_mode != '1':
+        raise SystemExit('Refusing to seed: LOW_RESOURCE_TEST_MODE must be 1.')
+    if project_name != 'comgraf-lan-light-test':
+        raise SystemExit('Refusing to seed: LOW_RESOURCE_PROJECT_NAME must be comgraf-lan-light-test.')
+    if not database.endswith('_test'):
         raise SystemExit('Refusing to seed: MYSQL_DATABASE must end in _test.')
+
+
+def main():
+    require_test_profile(
+        settings.mysql_database,
+        os.getenv('LOW_RESOURCE_TEST_MODE', '0'),
+        os.getenv('LOW_RESOURCE_PROJECT_NAME', ''),
+    )
     token = secrets.token_hex(4)
     credentials = {'environment': 'test-only', 'users': []}
     target = Path(os.getenv(
