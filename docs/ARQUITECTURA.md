@@ -1,0 +1,99 @@
+# Comgraf: decisiones y contrato operativo
+
+## Aplicación modular
+
+React 19 + JavaScript + Vite. FastAPI sirve los archivos compilados y `/api` desde el mismo origen. SQLAlchemy usa PyMySQL y exclusivamente MySQL/InnoDB. Alembic mantiene migraciones incrementales; revisiones 003/004 actualizan el flujo de producción y recuperan seguimientos vencidos heredados. Node solo compila la interfaz.
+
+`backend/app/routers` contiene transporte HTTP; `schemas.py`, validación de entrada; `services.py`, transacciones y reglas; `repository.py`, consultas y representación según permisos; `models.py`, relaciones persistentes. Calendario, cobros y comunicaciones no son servicios independientes.
+
+## Expediente único
+
+`cases.id` es estable; número visible `CG-000001`; enlace `/cases/1`. Cliente y contacto son claves foráneas. Una solicitud puede tener varias órdenes; `productions.id` identifica cada OP y `productions.case_id` la vincula al expediente. La revisión 008 conserva como IDs las claves históricas de las órdenes, de modo que sus números OP y enlaces `/cases/{id}` existentes siguen resolviendo la orden original. Productos, movimientos y seguimientos nuevos guardan además `production_id`; la solicitud conserva cliente, propietario, atención, ciclo de vida, notas y comunicación comunes.
+
+Estados independientes:
+
+- Atención: Abierto o Cerrado. El cierre no termina el trabajo ni elimina mensajes entrantes pendientes; se responde antes de cerrar.
+- Orden de producción: NEW/Nuevo → APPROVAL/Aprobación → PRINTING/Impresión → WORKSHOP/Encuadernación → READY/Listo para entregar. Solo estos cinco códigos estables son etapas; programación es una fecha independiente.
+- Entrega: Pendiente, Parcial, Completa; calculada por cantidades de cada producto.
+- Cobro: Pendiente, Vencido, Pagado, A favor; calculado a partir de movimientos.
+
+Cancelación es un evento excepcional con motivo y fecha. No elimina obligaciones, entregas ni pagos. Cerrar atención conserva producción, tareas futuras y cobranza; los vencimientos abiertos y mensajes entrantes pendientes requieren atención aunque el estado esté cerrado. Casos con procesos independientes se vinculan mediante `related_case_id`.
+
+Las bandejas operativas tienen predicados compartidos entre consulta y contador: Sin asignar = activa y sin propietario; Mis solicitudes = activa y propiedad del usuario; Requieren acción = activa, visible y sin propietario, con atención abierta, mensaje entrante pendiente o seguimiento vencido; Requieren mi acción agrega propiedad del usuario. Trabajo futuro, saldo pendiente o producción activa no disparan contacto por sí solos. La carga de trabajo conserva sus criterios operativos separados.
+
+Las solicitudes con producción se completan automáticamente cuando todas sus OP no anuladas están entregadas, cada saldo está resuelto y no quedan gestiones independientes. La evaluación se hace tras las operaciones que resuelven obligaciones, dentro de la misma transacción. `case_completion_blockers` comprueba cada OP y tareas/decisiones pendientes; `finalize_case` registra una sola transición auditada. Las solicitudes sin OP se completan manualmente. Todos los trabajos anulados no activan el cierre automático. `completions-preview` y `regularize-completions` conservan su operación explícita para regularización histórica auditada; el arranque no regulariza datos anteriores.
+
+Cada transición de atención nueva registra usuario, hora, estado anterior/nuevo y origen. La revisión 003 normalizó en lote estados activos anteriores; como esa revisión ya fue aplicada antes de esta corrección, el valor previo de esas filas no se puede recuperar del historial local. No se supone un estado original: las transiciones posteriores sí quedan trazadas.
+
+## Concurrencia y reintentos
+
+Operaciones críticas bloquean el caso con `SELECT ... FOR UPDATE`, comprueban versión y registran evento y clave idempotente en la misma transacción. La clave se asocia a usuario, acción y hash del contenido; reutilizarla para otra operación da conflicto. Las conversiones tienen además unicidad estructural por caso. Toma de casos bloquea el trabajador para hacer cumplir su capacidad incluso tomando casos distintos simultáneamente.
+
+Se usa aislamiento READ COMMITTED para que la segunda transacción vea el resultado confirmado de la primera. Errores 409 conservan el formulario, actualizan el expediente y permiten revisar antes de guardar. No hay actualizaciones financieras destructivas: un pago se corrige mediante una reversión enlazada, única y con motivo.
+
+## Alta y asignación
+
+Solo «Mis solicitudes» y sus subpestañas personales envían `creation_context=personal`; el servidor asigna entonces `owner_id` al usuario autenticado y aplica capacidad. Bandeja general, Mi día, perfil del cliente y otros accesos crean sin responsable. La ruta de Producción crea solicitud y OP en una transacción, sin propietario y sin consumir capacidad personal; el autor queda en eventos y `created_by_id`. Agregar una OP a una solicitud existente conserva su responsable.
+
+## Cotizaciones y producción
+
+Las cotizaciones guardan versiones inmutables en HNL y registran la decisión de cada versión. Una cotización histórica en USD permanece en USD y debe revisarse en una nueva versión HNL antes de convertirla; nunca se calcula una tasa implícita.
+
+Cada orden contiene uno o varios productos y una etapa/agenda propias. Generar una orden nueva la deja directamente en Aprobación, registra quién la creó y conserva una instantánea de productos; no registra una transición desde Nuevo ni evidencia de aprobación. La interfaz permite mantenerla en Aprobación o iniciar Impresión como segunda operación idempotente y auditable. Aprobación es una etapa actual, no una aprobación del cliente. No hay requisito de anticipo, arte adjunto o responsable por área para avanzar. El avance normal usa transiciones explícitas consecutivas; los retrocesos y bloqueos exigen motivo. El Administrador puede elegir directamente una etapa válida sin motivo ni escaneo ficticio; el backend registra el origen administrativo y rechaza órdenes anuladas, bloqueadas o con entregas registradas. La programación conserva sus fechas anterior/nueva, usuario y hora, sin razón obligatoria; el compromiso original permanece. Las órdenes antiguas en Nuevo o con etapa ambigua conservan sus datos; seleccionar una etapa histórica requiere clasificación explícita.
+
+El calendario distingue eventos (entrega comprometida, inicio programado y seguimiento) de la etapa actual de una orden. Las OP entregadas por completo o anuladas salen de eventos pendientes. La bandeja de producción y Listos para entregar cuentan y muestran órdenes; los filtros generales de etapa sobre solicitudes usan existencia de una OP coincidente y no duplican el expediente. La ficha imprimible y cada evento de producción llevan la OP seleccionada.
+
+## Catálogo e impresión
+
+`backend/app/cai.py` define el catálogo nuevo, la familia fiscal CAI y el formulario compartido; `frontend/src/domain.js` refleja sus opciones. «Talonario CAI» y «Talonarios y facturas» usan las mismas especificaciones; el genérico no se interpreta como documento fiscal. Las cuatro denominaciones CAI anteriores se aceptan para lectura histórica y se normalizan a «Talonario CAI» solo al crear una nueva OP, sin modificar la cotización ni su snapshot. `games_per_pad` es un entero de 1 a 10 000; el resumen de producción deriva juegos y hojas, mientras el precio comercial usa talonarios. La hoja fiscal muestra el producto real, QR y especificaciones aprobadas sin juegos por talonario ni precios.
+
+`specs.fiscal_document_type` guarda una de las nueve opciones definidas en `backend/app/cai.py` y reflejadas en `frontend/src/domain.js`. `ItemInput` la exige para nuevas líneas CAI y la prohíbe en productos genéricos. Los JSON históricos sin la clave se leen sin migración ni valor artificial. La conversión de una cotización CAI antigua permite completar solo el tipo o la encuadernación pendientes en la nueva OP; conserva intactos cotización y snapshot originales. La vista de detalles y la impresión muestran «No especificado» al leer líneas antiguas sin tipo.
+
+## Dinero y tiempo
+
+Importes DECIMAL(14,2), cantidades DECIMAL(14,3); dimensiones decimales serializadas como cadenas en JSON validado. Total = suma de cantidad × precio unitario, redondeo decimal HALF_UP al total. Las operaciones nuevas usan exclusivamente HNL, incluidas cotizaciones, producción y movimientos financieros. Los registros históricos USD conservan su moneda y no admiten nuevos pagos o ajustes HNL; los pagos históricos no se convierten ni se alteran. No hay conversión de divisas ni mezcla de monedas en KPI.
+
+Saldo = suma de movimientos con signo: obligación y reversión de pago positivos; anticipos/abonos negativos; ajustes firmados. Saldo vencido: cargos cuyo vencimiento es anterior al día local menos créditos disponibles, imputados primero a deuda vencida, limitado entre cero y saldo. Una reversión mantiene el vencimiento original. La revisión 018 permite vencimiento nulo cuando no se acordó fecha; no se presume una fecha. No hay interés, impuestos fiscales ni asientos contables.
+
+Instantes UTC en MySQL; presentación y límites de día en `APP_TIMEZONE` (America/Tegucigalpa). Fechas solicitadas, compromisos y vencimientos son fechas de calendario. Las revisiones de programación guardan fecha anterior y nueva, usuario y hora. Se conserva el compromiso original para medir puntualidad.
+
+## Acceso
+
+| Rol inicial | Lectura | Acciones |
+|---|---|---|
+| Administrador | Todo | Todo, usuarios y roles |
+| Coordinador | Todo | Asignación, reapertura, atención, producción, cobros, ajustes y autorización de liberación parcial |
+| Atención | Todos los casos y clientes, importes comerciales | Clientes; tomar; atender/cotizar/convertir sus casos |
+| Producción | Casos en producción | Programación, etapas principales, archivos y entregas; sin saldos, precios ni eventos financieros |
+| Cobranza | Casos en producción e importes | Anticipos, abonos e indicadores; sin ajustes ni producción |
+| Escáner de encuadernación | Resumen mínimo de la orden leída y órdenes del grupo pendientes | Confirmar encuadernación y solicitar liberación parcial; rol exclusivo |
+
+Las capacidades de roles salvo Administrador son configurables. Varios roles acumulan permisos. La interfaz oculta acciones según permisos, pero cada endpoint vuelve a autorizarlas. Las asignaciones son responsabilidades operativas, no aislamiento entre empresas. El límite de capacidad utiliza expedientes asignados pendientes (atención abierta, tarea pendiente, producción no entregada/no anulada o saldo por gestionar) una sola vez; el indicador de atención inmediata cuenta por separado los casos que requieren acción.
+
+Contraseñas Argon2id. Sesiones aleatorias, almacenadas como SHA256, cookie HttpOnly/SameSite Strict, revocables al salir o cambiar contraseña. Cada petición mutadora exige cabecera propia y origen coincidente; no se habilita CORS. Adjuntos identificados por UUID, descargados con autenticación, sin ruta pública. PDF/PNG/JPEG/TXT con límite, extensión y firma/UTF-8 comprobadas; no hay antivirus integrado.
+
+## Historial de comunicaciones
+
+Las tablas `mail_accounts`, `mail_messages`, `mail_attachments` y los borradores históricos permanecen para consulta y respaldo. Los mensajes vinculados a una solicitud aparecen como historial de solo lectura; los adjuntos exigen permiso de lectura del expediente. No hay trabajador, conexión a Yahoo, envío ni reintento. Los estados pendientes conservan su valor original. La clave Fernet histórica permanece fuera de MySQL y se incluye en los respaldos, aunque el arranque ya no la utiliza.
+
+## Indicadores
+
+El panel separa situación actual (solicitudes sin asignar o con acción, OP por etapa, atrasadas, listas, retiro y cobranza) del cumplimiento histórico de los últimos 30 días. Cada conteo operativo usa los predicados de sus bandejas. Puntualidad = OP no anuladas entregadas dentro del compromiso original / OP entregadas del período con fecha original; las que carecen de fecha se informan aparte. Los cambios manuales de etapa no se convierten en horas de trabajo. Los permisos comerciales limitan indicadores de cobro; no se suman monedas.
+
+## Bandejas y vencimientos
+
+`repository.py` construye filtros compartidos para página y contador, aplica orden con desempate por ID y pagina en MySQL. Usa agregaciones y expresiones correlacionadas para saldos y existencia de tareas; las filas no cargan bitácora, adjuntos ni especificaciones. Índices de tareas vencidas, vencimientos de ledger, etapa de producción y fechas de entrega respaldan los filtros. La recuperación de seguimientos se ejecuta al iniciar y cada 60 segundos en el proceso FastAPI; un cierre concurrente usa versión para no ocultar una interacción nueva.
+
+No se implementó WebSocket, sincronización sin conexión, multitenencia, fiscalidad ni publicación en Internet.
+
+## Ciclo de vida y recogida
+
+El estado de atención y el ciclo de vida son independientes. Un caso puede seguir Activo con atención Cerrada; Completar caso es una acción manual y atómica, y solo procede cuando no quedan trabajos sin entregar, saldos, devoluciones, revisiones de anulación ni tareas abiertas. El indicador histórico `pending_message` ya no bloquea esta acción porque no existe una operación de mensajería para resolverlo. El servidor devuelve los pendientes concretos y no los resuelve por su cuenta. Reactivar conserva producción, pagos, entregas y eventos anteriores. Los registros previos quedan Activos en la migración 007, sin archivado por inferencia.
+
+El paso de Encuadernación a Listo para entregar requiere confirmación del escáner para todas las órdenes todavía pendientes de habilitar en la solicitud. La confirmación queda asociada a la orden, ciclo, usuario y fecha del servidor. Una excepción autorizada libera solo la orden indicada y guarda solicitante, autorizador y justificación. La ruta de etapa ordinaria no puede saltarse ese control. Órdenes históricas que ya estaban listas conservan su etapa sin escaneos retroactivos. Al liberar se crea una única tarea PICKUP a siete días por orden, asignada al propietario principal si existe. La tarea se puede reprogramar; al resolver un contacto se puede crear el siguiente recordatorio semanal. Entrega parcial mantiene la tarea y la entrega completa resuelve solo las tareas PICKUP. La situación de pago se calcula desde el ledger y nunca se deduce del escaneo, de Contado ni del tiempo que lleva sin recogerse.
+
+Cada OP tiene un UUID de QR estable, que no es una credencial. El QR contiene solo el prefijo `CGOP1:` y ese UUID; consultar y confirmar requiere sesión del rol exclusivo. La terminal no reutiliza el endpoint de detalle del expediente y no devuelve importes, notas ni datos de cobro. Un reclamo que retrocede una orden invalida la confirmación y aumenta su ciclo; la confirmación anterior permanece en la bitácora.
+
+Las notas, incluidos los resúmenes de llamada o visita, son internas. La mensajería se retiró; las comunicaciones históricas siguen visibles sin acciones de envío. La conversión registra referencias estructuradas de OP y la versión exacta COT; la interfaz enlaza ambas dentro del mismo caso y aplica sus permisos.
+
+El contrato HTTP vigente es la versión 4 y el producto 1.4.0. La migración 009 agrega UUID de escaneo por orden, ciclos de confirmación y solicitudes auditables de excepción. Actualiza la interfaz y aplica Alembic antes de habilitar el escáner.

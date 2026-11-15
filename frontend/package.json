@@ -1,0 +1,41 @@
+{
+  "name": "comgraf",
+  "version": "1.5.0",
+  "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "lint": "eslint src e2e",
+    "test:unit": "node --test tests/*.test.mjs",
+    "format": "prettier --write \"src/**/*.{js,jsx}\" \"e2e/**/*.{js,mjs}\" \"tests/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.{js,jsx}\" \"e2e/**/*.{js,mjs}\" \"tests/**/*.mjs\"",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.90.21",
+    "@zxing/browser": "0.2.1",
+    "lucide-react": "0.577.0",
+    "qrcode": "1.5.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-router-dom": "7.18.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.58.2",
+    "@vitejs/plugin-react": "5.1.4",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "vite": "7.3.7"
+  }
+}

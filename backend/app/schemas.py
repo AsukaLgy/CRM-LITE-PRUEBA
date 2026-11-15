@@ -1,0 +1,400 @@
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Annotated, Literal
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from .password_policy import PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH
+from .cai import FISCAL_DOCUMENT_TYPES, LEGACY_CAI_PRODUCTS, MAX_GAMES_PER_PAD, NEW_PRODUCTS, is_cai_product, uses_print_form
+
+Money = Annotated[Decimal, Field(ge=0, max_digits=14, decimal_places=2)]
+Quantity = Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=3)]
+# This is the server contract; frontend/src/domain.js mirrors these choices for form controls.
+Status = Literal['Abierto', 'Cerrado']
+Stage = Literal['NEW', 'APPROVAL', 'PRINTING', 'WORKSHOP', 'READY']
+STAGE_LABELS = {
+    'NEW': 'Nuevo',
+    'APPROVAL': 'Aprobación',
+    'PRINTING': 'Impresión',
+    'WORKSHOP': 'Encuadernación',
+    'READY': 'Listo para entregar',
+}
+NEXT_STAGE = {'NEW': 'APPROVAL', 'APPROVAL': 'PRINTING', 'PRINTING': 'WORKSHOP', 'WORKSHOP': 'READY'}
+PREVIOUS_STAGES = {
+    'APPROVAL': {'NEW'},
+    'PRINTING': {'NEW', 'APPROVAL'},
+    'WORKSHOP': {'NEW', 'APPROVAL', 'PRINTING'},
+    'READY': {'NEW', 'APPROVAL', 'PRINTING', 'WORKSHOP'},
+}
+Product = str
+DELIVERY_METHODS = ('Retiro en local', 'Entrega')
+LEGACY_DELIVERY_METHODS = ('Retiro en taller', 'Entrega (delivery)')
+PAYMENT_TERMS = ('Contado', 'Crédito')
+
+
+class Input(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+
+
+class BindingScanInput(Input):
+    scan_id: str = Field(pattern=r'^CGOP1:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$')
+
+
+class PartialReleaseRequestInput(BindingScanInput):
+    comment: str = Field(min_length=1, max_length=2000)
+    request_key: str = Field(min_length=20, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
+class PartialReleaseDecisionInput(Input):
+    approve: bool
+    comment: str = Field(min_length=1, max_length=1000)
+    request_key: str = Field(min_length=20, max_length=80, pattern=r'^[a-zA-Z0-9_-]+$')
+
+
+# ---- Sesión, usuarios y perfiles comerciales ----
+class LoginInput(Input):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserInput(Input):
+    username: str = Field(min_length=3, max_length=80, pattern=r'^[a-zA-Z0-9_.-]+$')
+    name: str = Field(min_length=2, max_length=160)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+    roles: list[str] = Field(min_length=1, max_length=10)
+    capacity: int = Field(default=20, ge=1, le=500)
+
+
+class UserUpdate(Input):
+    name: str = Field(min_length=2, max_length=160)
+    roles: list[str] = Field(min_length=1, max_length=10)
+    active: bool
+    capacity: int = Field(ge=1, le=500)
+    password: str | None = Field(default=None, min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
+class ContactInput(Input):
+    name: str = Field(min_length=1, max_length=180)
+    phone: str = Field(default='', max_length=60)
+    email: str = Field(default='', max_length=180)
+    position: str = Field(default='', max_length=120)
+
+
+class ClientInput(Input):
+    name: str = Field(min_length=1, max_length=180)
+    company: str = Field(default='', max_length=180)
+    # Keep raw whitespace so the API can reject it instead of silently trimming it.
+    rtn: Annotated[str, StringConstraints(strip_whitespace=False, max_length=30)] = ''
+    phones: list[Annotated[str, Field(max_length=60)]] = Field(default_factory=list, max_length=20)
+    emails: list[Annotated[str, Field(max_length=180)]] = Field(default_factory=list, max_length=20)
+    addresses: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=20)
+    observations: str = Field(default='', max_length=10000)
+    provisional: bool = True
+
+
+class ClientUpdate(ClientInput):
+    version: int
+
+
+class CaseInput(Input):
+    client_id: int
+    contact_id: int | None = None
+    related_case_id: int | None = None
+    subject: str = Field(min_length=1, max_length=240)
+    description: str = Field(default='', max_length=20000)
+    kind: Literal['Cotización', 'Solicitud', 'Reclamo']
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] = 'Normal'
+    creation_context: Literal['pool', 'personal'] = 'pool'
+
+
+class Mutation(Input):
+    version: int = Field(ge=1)
+    key: str = Field(min_length=16, max_length=80)
+    production_id: int | None = Field(default=None, ge=1)
+
+
+# ---- Atención, comunicación y tareas ----
+class Assignment(Mutation):
+    owner_id: int | None = None
+
+
+class CaseUpdate(Mutation):
+    status: Status
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] | None = None
+    next_action: str | None = Field(default=None, max_length=500)
+
+
+class CaseDetailsInput(Mutation):
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] | None = None
+    next_action: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode='after')
+    def has_change(self):
+        if self.priority is None and self.next_action is None:
+            raise ValueError('Indica prioridad o próxima acción')
+        return self
+
+
+class TaskReschedule(Mutation):
+    due_at: datetime
+
+    @field_validator('due_at')
+    @classmethod
+    def utc(cls, value):
+        return TaskInput.utc(value)
+
+
+class EventInput(Mutation):
+    kind: Literal['Nota interna']
+    channel: Literal['Nota']
+    body: str = Field(min_length=1, max_length=20000)
+    direction: Literal['Interna'] = 'Interna'
+
+
+class TaskInput(Mutation):
+    title: str = Field(min_length=1, max_length=500)
+    owner_id: int
+    due_at: datetime
+    purpose: Literal['ATTENTION', 'COLLECTION'] = 'ATTENTION'
+
+    @field_validator('due_at')
+    @classmethod
+    def utc(cls, value):
+        if value.tzinfo is None:
+            raise ValueError('Incluir zona horaria en la fecha')
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+class TaskCompletionInput(Mutation):
+    note: str = Field(default='', max_length=20000)
+    schedule_next_pickup: bool = False
+
+
+class PasswordChangeInput(Input):
+    current_password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
+class CaseLifecycleInput(Mutation):
+    pass
+
+
+class Specs(Input):
+    width: Annotated[Decimal, Field(gt=0, max_digits=10, decimal_places=3)] | None = None
+    height: Annotated[Decimal, Field(gt=0, max_digits=10, decimal_places=3)] | None = None
+    measure_unit: Literal['cm', 'm', 'mm'] = 'cm'
+    material: str = Field(default='', max_length=200)
+    sides: Literal['1', '2'] | None = None
+    inks: str = Field(default='', max_length=120)
+    copies: int | None = Field(default=None, ge=0, le=20)
+    numbering: str = Field(default='', max_length=200)
+    sheets: int | None = Field(default=None, ge=1, le=10000)
+    binding: str = Field(default='', max_length=120)
+    finishes: str = Field(default='', max_length=300)
+    detail: str = Field(default='', max_length=3000)
+    cai_format: Literal['Media carta', 'Cuarto de carta', '8.5 × 7.25', '8.5 × 8.5', 'Carta'] | None = None
+    games_per_pad: int | None = Field(default=None, strict=True, ge=1, le=MAX_GAMES_PER_PAD)
+    paper_type: Literal['Bond', 'Químico'] | None = None
+    additional_copies: Literal[1, 2, 3] | None = None
+    cai_binding: Literal['Engrapado', 'Pegado', 'Hojas sueltas'] | None = None
+    fiscal_document_type: str | None = None
+
+    @field_validator('fiscal_document_type')
+    @classmethod
+    def known_fiscal_document_type(cls, value):
+        if value is not None and value not in FISCAL_DOCUMENT_TYPES:
+            raise ValueError('Selecciona un tipo de documento fiscal válido')
+        return value
+
+
+# ---- Cotización y conversión a una orden activa ----
+class ItemInput(Input):
+    product: Product
+    quantity: Quantity
+    unit: str = Field(default='unidades', min_length=1, max_length=30)
+    unit_price: Money = Decimal('0')
+    specs: Specs = Field(default_factory=Specs)
+
+    @field_validator('product')
+    @classmethod
+    def known_product(cls, value):
+        if value not in NEW_PRODUCTS and value not in LEGACY_CAI_PRODUCTS:
+            raise ValueError('Selecciona un producto del catálogo')
+        return value
+
+    @model_validator(mode='after')
+    def cai_contract(self):
+        cai_fields = ('cai_format', 'games_per_pad', 'paper_type', 'additional_copies', 'cai_binding')
+        if uses_print_form(self.product):
+            if self.unit != 'talonarios':
+                raise ValueError('La unidad comercial de este formulario debe ser talonarios')
+            if self.quantity != self.quantity.to_integral_value():
+                raise ValueError('La cantidad de talonarios debe ser un entero positivo')
+            if any(getattr(self.specs, name) is None for name in cai_fields):
+                raise ValueError('Completa formato, juegos, papel, copias y encuadernación')
+            if is_cai_product(self.product) and self.specs.fiscal_document_type is None:
+                raise ValueError('Selecciona el tipo de documento fiscal')
+            if not is_cai_product(self.product) and self.specs.fiscal_document_type is not None:
+                raise ValueError('El tipo de documento fiscal solo se permite para Talonario CAI')
+        elif any(getattr(self.specs, name) is not None for name in cai_fields):
+            raise ValueError('Estas especificaciones solo se permiten para productos con formulario de talonarios')
+        elif self.specs.fiscal_document_type is not None:
+            raise ValueError('El tipo de documento fiscal solo se permite para Talonario CAI')
+        return self
+
+
+class QuoteInput(Mutation):
+    items: list[ItemInput] = Field(min_length=1, max_length=100)
+    currency: Literal['HNL'] = 'HNL'
+    valid_until: date
+
+    @model_validator(mode='after')
+    def current_catalog(self):
+        if any(item.product not in NEW_PRODUCTS for item in self.items):
+            raise ValueError('Las nuevas cotizaciones deben usar el catálogo vigente')
+        return self
+
+
+class QuoteDecision(Mutation):
+    status: Literal['Aceptada', 'Rechazada']
+    evidence: str = Field(min_length=3, max_length=3000)
+
+
+class Conversion(Mutation):
+    quote_id: int | None = None
+    items: list[ItemInput] = Field(default_factory=list, max_length=100)
+    requested_date: date | None = None
+    committed_date: date | None = None
+    currency: Literal['HNL'] = 'HNL'
+    payment_terms: Literal['Contado', 'Crédito'] = 'Contado'
+    advance_required: Money = Decimal('0')
+    payment_due_date: date | None = None
+    delivery_method: str = Field(default=DELIVERY_METHODS[0], min_length=1, max_length=120)
+    instructions: str = Field(default='', max_length=10000)
+    contact_id: int | None = Field(default=None, ge=1)
+    phone: str = Field(default='', max_length=60)
+    email: str = Field(default='', max_length=180)
+
+    @field_validator('delivery_method')
+    @classmethod
+    def known_delivery_method(cls, value):
+        if value not in DELIVERY_METHODS + LEGACY_DELIVERY_METHODS:
+            raise ValueError('Selecciona Retiro en local o Entrega')
+        return value
+
+
+class ProductionRequestInput(Conversion):
+    client_id: int
+    contact_id: int | None = None
+    subject: str = Field(min_length=1, max_length=240)
+    description: str = Field(default='', max_length=20000)
+    priority: Literal['Baja', 'Normal', 'Alta', 'Urgente'] = 'Normal'
+
+
+class StageInput(Mutation):
+    stage: Stage
+    reason: str = Field(default='', max_length=3000)
+
+
+class AdminStageInput(Mutation):
+    production_id: int = Field(ge=1)
+    stage: Literal['APPROVAL', 'PRINTING', 'WORKSHOP', 'READY']
+
+
+class TitleInput(Input):
+    version: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=240)
+
+
+class ScannerTitleInput(BindingScanInput, TitleInput):
+    pass
+
+
+class WorkFinishedInput(Input):
+    production_id: int = Field(ge=1)
+
+
+# ---- Producción, entregas y movimientos financieros ----
+class ReasonInput(Mutation):
+    reason: str = Field(min_length=3, max_length=3000)
+
+
+class CancellationInput(Mutation):
+    reason: str = Field(min_length=3, max_length=3000)
+    treatment: Literal['SIN_CARGO', 'IMPORTE_FINAL'] | None = None
+    final_amount: Money | None = None
+
+    @model_validator(mode='after')
+    def cancellation_choice(self):
+        if self.treatment == 'IMPORTE_FINAL' and self.final_amount is None:
+            raise ValueError('Indica el importe final acordado')
+        if self.treatment == 'SIN_CARGO' and self.final_amount not in (None, Decimal('0')):
+            raise ValueError('Sin cargo fija el importe final en cero')
+        if self.treatment is None and self.final_amount is not None:
+            raise ValueError('El importe requiere un tratamiento económico')
+        return self
+
+
+class RefundInput(Mutation):
+    amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)]
+    reference: str = Field(min_length=1, max_length=240)
+
+
+class ScheduleInput(Mutation):
+    committed_date: date
+    scheduled_at: datetime
+
+    @field_validator('scheduled_at')
+    @classmethod
+    def utc(cls, value):
+        return TaskInput.utc(value)
+
+
+class DeliveryInput(Mutation):
+    item_id: int
+    quantity: Quantity
+    delivered_at: datetime
+    receiver: str = Field(min_length=1, max_length=180)
+    method: str = Field(min_length=1, max_length=100)
+    evidence: str = Field(min_length=3, max_length=3000)
+
+    @field_validator('delivered_at')
+    @classmethod
+    def utc(cls, value):
+        return TaskInput.utc(value)
+
+
+class DeliveryWithPaymentInput(DeliveryInput):
+    payment_amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)] | None = None
+    payment_reference: str | None = Field(default=None, min_length=1, max_length=240)
+
+
+class CompleteDeliveryInput(Mutation):
+    production_id: int = Field(ge=1)
+    method: Literal['Retiro en local', 'Entrega', 'Retiro en taller', 'Entrega (delivery)']
+    receiver: str = Field(default='', max_length=180)
+    evidence: str = Field(default='', max_length=3000)
+    payment_amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)] | None = None
+    payment_reference: str | None = Field(default=None, min_length=1, max_length=240)
+    balance_reason: str | None = Field(default=None, min_length=3, max_length=300)
+
+
+class PaymentInput(Mutation):
+    amount: Annotated[Decimal, Field(gt=0, max_digits=14, decimal_places=2)]
+    kind: Literal['Anticipo', 'Abono'] = 'Abono'
+    reference: str = Field(min_length=1, max_length=240)
+
+
+class AdjustmentInput(Mutation):
+    amount: Annotated[Decimal, Field(max_digits=14, decimal_places=2)]
+    reason: str = Field(min_length=3, max_length=3000)
+    due_date: date
+
+
+class DraftInput(Input):
+    body: str = Field(max_length=20000)
+    version: int = Field(ge=0)
+
+
+# ---- Preferencias de bandeja ----
+class ViewInput(Input):
+    name: str = Field(min_length=1, max_length=100)
+    filters: dict

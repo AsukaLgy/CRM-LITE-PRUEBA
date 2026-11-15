@@ -1,0 +1,156 @@
+import asyncio
+import logging
+import os
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlparse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from anyio import to_thread
+from .config import settings
+from .version import PRODUCT_VERSION, CONTRACT_VERSION
+from .cai import CATALOG_REVISION
+from .db import engine, SessionLocal
+from .routers import auth, clients, cases, production, reports, scanner, history
+from .services import reopen_overdue_attention
+from .deletion import retry_file_cleanup
+
+logger = logging.getLogger(__name__)
+
+async def attention_recovery_loop():
+    """Reopen due follow-ups even when no worker has a browser open."""
+    while True:
+        try:
+            with SessionLocal.begin() as db:
+                reopen_overdue_attention(db)
+            await to_thread.run_sync(retry_file_cleanup)
+        except Exception:
+            # A database outage is retried on the next cycle; it never blocks startup.
+            logger.exception('Falló la recuperación de seguimientos vencidos')
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    to_thread.current_default_thread_limiter().total_tokens = settings.web_thread_limit
+    task = asyncio.create_task(attention_recovery_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try: await task
+        except asyncio.CancelledError: pass
+
+
+app = FastAPI(title='Comgraf · HTTP interno', docs_url=None, redoc_url=None, lifespan=lifespan)
+app.state.session_generation = os.getenv('COMGRAF_SESSION_GENERATION', 'test-generation')
+
+
+def error_code(status, detail):
+    message = str(detail).lower()
+    if status == 410: return 'FEATURE_RETIRED'
+    if 'bloqueo' in message or 'bloqueado' in message: return 'PRODUCTION_BLOCKED'
+    if 'contrato' in message or 'interfaz' in message: return 'CLIENT_CONTRACT_MISMATCH'
+    if status == 403: return 'PERMISSION_DENIED'
+    if 'seguimiento' in message and ('vencido' in message or 'reprograma' in message): return 'OVERDUE_FOLLOWUP'
+    if 'etapa ya está' in message or 'etapa ya esta' in message: return 'SAME_STAGE'
+    if 'etapa' in message and ('siguiente' in message or 'retroceder' in message): return 'INVALID_TRANSITION'
+    if status == 422: return 'FIELD_VALIDATION'
+    if status == 409:
+        if 'cambió' in message or 'cambio' in message or 'versión' in message or 'version' in message: return 'VERSION_CONFLICT'
+        return 'BUSINESS_CONFLICT'
+    return 'HTTP_ERROR'
+
+
+@app.middleware('http')
+async def guard(request: Request, call_next):
+    incident_id = uuid.uuid4().hex[:12]
+    request.state.incident_id = incident_id
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and request.url.path.startswith('/api'):
+        if request.headers.get('X-Comgraf-Request') != '1':
+            return JSONResponse({'detail': 'Solicitud de origen no autorizado'}, 403)
+        contract = request.headers.get('X-Comgraf-Contract')
+        if contract != CONTRACT_VERSION:
+            return JSONResponse({'detail': 'Contrato HTTP incompatible. Actualiza la interfaz y reinicia Comgraf.', 'code': 'CLIENT_CONTRACT_MISMATCH'}, 409)
+        origin = request.headers.get('origin')
+        if origin and urlparse(origin).netloc != request.headers.get('host'):
+            return JSONResponse({'detail': 'Origen no autorizado'}, 403)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception('Incidencia %s en %s %s', incident_id, request.method, request.url.path)
+        response = JSONResponse({'detail': 'Ocurrió un error interno. Conserva el formulario y reintenta con la misma operación.',
+                                 'code': 'INTERNAL_ERROR', 'incident_id': incident_id}, status_code=500)
+    if response.status_code >= 500:
+        response.headers['X-Comgraf-Incident'] = incident_id
+    if request.method in ('GET', 'HEAD') and not request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-cache, must-revalidate'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    if request.url.path.startswith('/api'): response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_error(request: Request, error: HTTPException):
+    detail = error.detail
+    return JSONResponse({'detail': detail, 'code': error_code(error.status_code, detail)}, status_code=error.status_code, headers=error.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, error: RequestValidationError):
+    details = [{key: value for key, value in issue.items() if key not in ('ctx', 'input', 'url')}
+               for issue in error.errors()]
+    return JSONResponse({'detail': details, 'code': 'FIELD_VALIDATION'}, status_code=422)
+
+
+@app.exception_handler(IntegrityError)
+async def integrity(request, error):
+    logger.exception('Incidencia %s de integridad en %s', request.state.incident_id, request.url.path)
+    return JSONResponse({'detail': 'El registro cambió o ya existe. Actualiza y revisa antes de reintentar.',
+                         'code': 'BUSINESS_CONFLICT', 'incident_id': request.state.incident_id}, 409)
+
+
+@app.exception_handler(OperationalError)
+async def unavailable(request, error):
+    logger.exception('Incidencia %s de base de datos en %s', request.state.incident_id, request.url.path)
+    return JSONResponse({'detail': 'La base de datos no está disponible. Conserva el formulario y reintenta.',
+                         'code': 'DATABASE_UNAVAILABLE', 'incident_id': request.state.incident_id}, 503)
+
+
+for router in (auth.router, clients.router, cases.router, production.router, reports.router, scanner.router, history.router):
+    app.include_router(router)
+
+
+@app.get('/api/health')
+def health():
+    with engine.connect() as conn:
+        conn.execute(text('SELECT 1'))
+    return {'status': 'ok', 'database': 'mysql', 'app': 'Comgraf'}
+
+
+@app.get('/api/version')
+def version():
+    return {'product': 'Comgraf', 'product_version': PRODUCT_VERSION, 'build': settings.build_id,
+            'commit': settings.comgraf_build_commit, 'build_date': settings.comgraf_build_date,
+            'contract_version': CONTRACT_VERSION, 'catalog_revision': CATALOG_REVISION}
+
+
+static = Path(settings.static_dir)
+if (static / 'assets').exists(): app.mount('/assets', StaticFiles(directory=static / 'assets'), name='assets')
+if (static / 'branding').exists(): app.mount('/branding', StaticFiles(directory=static / 'branding'), name='branding')
+
+
+@app.get('/{path:path}')
+def spa(path: str):
+    if path.startswith('api/'):
+        return JSONResponse({'detail': 'Ruta no encontrada'}, 404)
+    if (static / 'index.html').exists(): return FileResponse(static / 'index.html')
+    return JSONResponse({'detail': 'Compila la interfaz: npm --prefix frontend run build'}, 503)

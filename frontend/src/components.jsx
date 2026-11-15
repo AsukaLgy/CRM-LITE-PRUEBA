@@ -1,0 +1,354 @@
+import { cloneElement, useEffect, useId, useRef, useState } from 'react'
+import { X, AlertCircle, LoaderCircle, Inbox } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import { api, uid } from './api'
+
+export function Badge({ children, tone = '' }) {
+  return <span className={'badge ' + tone}>{children}</span>
+}
+export function ErrorBox({ error }) {
+  const guidance = {
+    VERSION_CONFLICT: 'Actualiza la solicitud y revisa los datos antes de volver a guardar.',
+    SAME_STAGE: 'La etapa ya cambió. Actualiza la solicitud para ver las acciones disponibles.',
+    INVALID_TRANSITION: 'Elige la etapa siguiente o registra un reclamo con motivo.',
+    OVERDUE_FOLLOWUP: 'Completa o reprograma el seguimiento vencido y vuelve a intentar.',
+    PRODUCTION_BLOCKED: 'Resuelve el bloqueo de producción antes de avanzar.',
+    PERMISSION_DENIED: 'Tu rol no tiene permiso para esta operación.',
+    CLIENT_CONTRACT_MISMATCH:
+      'La interfaz y el servidor tienen contratos incompatibles. Ejecuta scripts/update-local.ps1 y reinicia Comgraf.',
+  }
+  return error ? (
+    <div role="alert" className="error">
+      <AlertCircle size={16} />
+      <span>
+        {error.message || error}
+        {guidance[error.code] && <small className="error-guidance"> {guidance[error.code]}</small>}
+      </span>
+    </div>
+  ) : null
+}
+export function Loading() {
+  return (
+    <div className="empty" role="status">
+      <LoaderCircle className="spin" />
+      Cargando…
+    </div>
+  )
+}
+export function Empty({ children = 'No hay registros en esta vista.' }) {
+  return (
+    <div className="empty">
+      <Inbox size={30} />
+      <p>{children}</p>
+    </div>
+  )
+}
+export function Field({ label, children, ...props }) {
+  const required = Boolean(
+    (props.required || children?.props?.required) &&
+    (children?.props?.type || props.type) !== 'checkbox',
+  )
+  return (
+    <label className={'field ' + (props.className || '')}>
+      <span>
+        {label}
+        {required && (
+          <span className="required-mark" aria-hidden="true">
+            {' '}
+            *
+          </span>
+        )}
+      </span>
+      {children ? (
+        cloneElement(children, {
+          'aria-label': label,
+          required,
+          'aria-required': required || undefined,
+        })
+      ) : (
+        <input
+          aria-label={label}
+          {...props}
+          required={required}
+          aria-required={required || undefined}
+        />
+      )}
+      {required && <small className="required-help">* Campo obligatorio</small>}
+    </label>
+  )
+}
+export function Select({ label, options, empty, ...props }) {
+  return (
+    <Field label={label}>
+      <select {...props}>
+        {empty !== undefined && <option value="">{empty}</option>}
+        {options.map((x) => (
+          <option
+            key={typeof x === 'object' ? x.value : x}
+            value={typeof x === 'object' ? x.value : x}
+          >
+            {typeof x === 'object' ? x.label : x}
+          </option>
+        ))}
+      </select>
+    </Field>
+  )
+}
+export function RadioGroup({
+  label,
+  name,
+  options,
+  value,
+  onChange,
+  required = false,
+  disabled = false,
+}) {
+  const generatedName = useId()
+  return (
+    <fieldset className="choice-group" disabled={disabled}>
+      <legend>
+        {label}
+        {required && (
+          <span className="required-mark" aria-hidden="true">
+            {' '}
+            *
+          </span>
+        )}
+      </legend>
+      <div className="choice-options">
+        {options.map((option) => (
+          <label
+            className={`choice-option${value === option.value ? ' selected' : ''}`}
+            key={option.value}
+          >
+            <input
+              type="radio"
+              name={name || generatedName}
+              value={option.value}
+              checked={value === option.value}
+              required={required}
+              onChange={() => onChange(option.value)}
+            />
+            <span className="choice-mark" aria-hidden="true" />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
+      {required && <small className="required-help">* Campo obligatorio</small>}
+    </fieldset>
+  )
+}
+export function Panel({ title, action, children, className = '' }) {
+  return (
+    <section className={'panel ' + className}>
+      <div className="panel-title">
+        <h2>{title}</h2>
+        {action}
+      </div>
+      <div className="panel-body">{children}</div>
+    </section>
+  )
+}
+export function Modal({ title, onClose, children, wide = false, busy = false }) {
+  const ref = useRef()
+  const titleId = useId()
+  useEffect(() => {
+    const prior = document.activeElement
+    ref.current.showModal()
+    return () => prior?.focus()
+  }, [])
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      className={wide ? 'wide' : ''}
+      onCancel={(e) => {
+        e.preventDefault()
+        if (!busy) onClose()
+      }}
+    >
+      <header>
+        <h2 id={titleId}>{title}</h2>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Cerrar diálogo"
+          onClick={onClose}
+          disabled={busy}
+        >
+          <X size={20} />
+        </button>
+      </header>
+      {children}
+    </dialog>
+  )
+}
+export function FormDialog({
+  title,
+  initial,
+  onClose,
+  onSave,
+  render,
+  wide,
+  submit = 'Guardar',
+  busyLabel = 'Guardando…',
+  canSubmit = true,
+  afterSave,
+}) {
+  const [values, setValues] = useState(initial),
+    [error, setError] = useState(null),
+    [busy, setBusy] = useState(false),
+    [saved, setSaved] = useState(false)
+  const locked = useRef(false),
+    errorRef = useRef(null)
+  useEffect(() => {
+    if (error) errorRef.current?.focus()
+  }, [error])
+  const change = (key, value) => {
+    setValues((v) => ({ ...v, [key]: value }))
+    setError(null)
+  }
+  async function save(e) {
+    e.preventDefault()
+    if (locked.current) return
+    locked.current = true
+    setBusy(true)
+    setError(null)
+    try {
+      const closeAfter = await onSave(values)
+      if (closeAfter === false) setSaved(true)
+      else onClose()
+    } catch (err) {
+      setError(err)
+    } finally {
+      locked.current = false
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={title} onClose={onClose} wide={wide} busy={busy}>
+      {saved && afterSave ? (
+        afterSave()
+      ) : (
+        <form onSubmit={save}>
+          <div className="dialog-body">
+            {render(values, change)}
+            <div ref={errorRef} tabIndex={-1} aria-label="Error al guardar">
+              <ErrorBox error={error} />
+            </div>
+          </div>
+          <footer>
+            <button type="button" onClick={onClose} disabled={busy}>
+              Cancelar
+            </button>
+            <button className="primary" disabled={busy || !canSubmit}>
+              {busy ? busyLabel : typeof submit === 'function' ? submit(values) : submit}
+            </button>
+          </footer>
+        </form>
+      )}
+    </Modal>
+  )
+}
+export function Operation({
+  record,
+  path,
+  title,
+  method = 'POST',
+  fields = [],
+  initial = {},
+  children,
+  renderSummary,
+  onSaved,
+  onClose,
+  transform = (v) => v,
+  submit = 'Guardar',
+}) {
+  const qc = useQueryClient(),
+    key = useRef(uid()),
+    lastPayload = useRef(null)
+  const defaults = Object.fromEntries(
+    fields.map((f) => [f.name, f.value ?? (f.type === 'checkbox' ? false : '')]),
+  )
+  async function save(values) {
+    const body = transform(values),
+      signature = JSON.stringify(body)
+    if (lastPayload.current !== null && signature !== lastPayload.current) key.current = uid()
+    lastPayload.current = signature
+    try {
+      const result = await api(`/cases/${record.id}/${path}`, {
+        method,
+        body: {
+          ...(record.production?.id ? { production_id: record.production.id } : {}),
+          ...body,
+          version: record.version,
+          key: key.current,
+        },
+      })
+      onSaved?.(result)
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['case', String(record.id)] }),
+        qc.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'case' }),
+      ])
+    } catch (error) {
+      if (error.status === 409)
+        await qc.invalidateQueries({ queryKey: ['case', String(record.id)] })
+      throw error
+    }
+  }
+  return (
+    <FormDialog
+      title={title}
+      initial={{ ...defaults, ...initial }}
+      onClose={onClose}
+      onSave={save}
+      submit={submit}
+      render={(v, set) => (
+        <>
+          {children}
+          <div className="form-grid">
+            {fields
+              .filter((f) => !f.when || f.when(v))
+              .map((f) =>
+                f.options ? (
+                  <Select
+                    key={f.name}
+                    label={f.label}
+                    options={typeof f.options === 'function' ? f.options(v) : f.options}
+                    empty={f.empty}
+                    value={v[f.name]}
+                    required={typeof f.required === 'function' ? f.required(v) : f.required}
+                    onChange={(e) => set(f.name, e.target.value)}
+                  />
+                ) : f.type === 'textarea' ? (
+                  <Field key={f.name} label={f.label} className="full">
+                    <textarea
+                      rows={3}
+                      required={typeof f.required === 'function' ? f.required(v) : f.required}
+                      value={v[f.name]}
+                      onChange={(e) => set(f.name, e.target.value)}
+                    />
+                  </Field>
+                ) : (
+                  <Field
+                    key={f.name}
+                    label={f.label}
+                    type={f.type || 'text'}
+                    min={f.min}
+                    step={f.step}
+                    required={typeof f.required === 'function' ? f.required(v) : f.required}
+                    value={f.type === 'checkbox' ? undefined : v[f.name]}
+                    checked={f.type === 'checkbox' ? v[f.name] : undefined}
+                    onChange={(e) =>
+                      set(f.name, f.type === 'checkbox' ? e.target.checked : e.target.value)
+                    }
+                  />
+                ),
+              )}
+          </div>
+          {renderSummary?.(v)}
+        </>
+      )}
+    />
+  )
+}

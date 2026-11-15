@@ -1,0 +1,8 @@
+http://:80 {
+	redir https://{$HTTPS_HOST}{uri} permanent
+}
+
+:443 {
+	tls /certs/comgraf.pem /certs/comgraf-key.pem
+	reverse_proxy app:8000
+}
